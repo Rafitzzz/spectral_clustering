@@ -77,6 +77,8 @@ def get_similarity_matrix_from_distance_matrix(
         Symmetric similarity matrix derived from the chosen graph rule.
     """
     # TODO: Think about self-edges. They do not change the Laplacian, but do we need to take care of them?
+
+    # Define similarity matrix
     if sim_graph_type == "fully_connect":
         W = np.exp(-distance_matrix / (2 * sigma))
     elif sim_graph_type == "eps_neighbor":
@@ -177,4 +179,4 @@ def Spectral_Clustering(W, K=8, normalized=1, random_state=1):
 
     # TODO: Do the eigenvalues of the normalized cases make any sense? Double check and is V_K the correct matrix to be returned
     # TODO: Epsilon threshold for the zero eigenvalues
-    return (kmeans, V_K, eigenvalues[eigenvalue_indices_sorted[:K]])
+    return (kmeans, V_K, eigenvalues)
