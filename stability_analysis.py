@@ -1,8 +1,13 @@
 import numpy as np
 from scipy.optimize import linear_sum_assignment
-from sklearn.metrics import confusion_matrix
+from sklearn.metrics import confusion_matrix, normalized_mutual_info_score
+from sklearn.model_selection import StratifiedKFold
 
-from spectral_clustering import *
+from spectral_clustering import (
+    Spectral_Clustering,
+    get_distance_matrix_from_data,
+    get_similarity_matrix_from_distance_matrix,
+)
 
 
 def match_labels(y_true, y_pred):
@@ -106,20 +111,21 @@ def run_single_clustering_on_perturbation(
         epsilon=best_params.get("epsilon", 0),
     )
 
-    res, evects, evalues = Spectral_Clustering(
-        similarity_matrix, K=K, random_state=random_state
+    result = Spectral_Clustering(
+        similarity_matrix,
+        K=K,
+        random_state=random_state,
     )
 
-    cm_before = confusion_matrix(y_true, res.labels_)
-    cm_after, labels_aligned = match_labels(y_true, res.labels_)
+    cm_after, labels_aligned = match_labels(y_true, result.clustering_model.labels_)
 
     return {
         "Xp": Xp,
         "labels_aligned": labels_aligned,
         "confusion_matrix": cm_after,
         "accuracy": float((y_true == labels_aligned).mean()),
-        "eigenvalues": evalues,
-        "eigenvectors": evects,
+        "eigenvalues": result.eigenvalues,
+        "eigenvectors": result.eigenvectors,
     }
 
 
@@ -193,3 +199,117 @@ def run_experiment(
     if return_all:
         return results
     return {"results": results, "accuracy": accuracy}
+
+
+def cross_validation_stability_test(
+    similarity_matrix,
+    K_folds=5,
+    K_clusters=4,
+    random_state=19,
+    test_size=0.20,
+    info_score=normalized_mutual_info_score,
+):
+    """Evaluate spectral clustering stability via stratified K-fold splits.
+
+    Parameters
+    ----------
+    similarity_matrix : ndarray
+        Precomputed similarity/adjacency matrix for the full dataset (square).
+    K_folds : int, default=5
+        Number of stratified folds used in the stability test.
+    K_clusters : int, default=4
+        Number of clusters to request from :func:`Spectral_Clustering`.
+    random_state : int, default=19
+        Seed for the ``StratifiedKFold`` shuffling as well as per-fold clustering.
+    test_size : float, default=0.20
+        Reserved for API compatibility; not used directly in the current routine.
+    info_score : callable, default=normalized_mutual_info_score
+        Function applied to compare the per-fold labels with the reference
+        partition. Larger values indicate closer agreement.
+
+    Returns
+    -------
+    dict
+        Dictionary containing the reference labels, per-fold scores, and their
+        mean/std summary.
+    """
+
+    if (
+        similarity_matrix.ndim != 2
+        or similarity_matrix.shape[0] != similarity_matrix.shape[1]
+    ):
+        raise ValueError("similarity_matrix must be a square matrix")
+    if K_folds < 2:
+        raise ValueError("K_folds must be at least 2")
+
+    full_result = Spectral_Clustering(
+        similarity_matrix,
+        K=K_clusters,
+        random_state=random_state,
+    )
+    reference_labels = full_result.labels
+
+    skf = StratifiedKFold(
+        n_splits=K_folds,
+        shuffle=True,
+        random_state=random_state,
+    )
+
+    dummy_features = np.zeros((similarity_matrix.shape[0], 1))
+    fold_scores = []
+
+    for fold_idx, (train_idx, _) in enumerate(
+        skf.split(dummy_features, reference_labels), start=1
+    ):
+        train_matrix = similarity_matrix[np.ix_(train_idx, train_idx)]
+
+        fold_result = Spectral_Clustering(
+            train_matrix,
+            K=K_clusters,
+            random_state=random_state + fold_idx,
+        )
+        fold_labels = fold_result.labels
+
+        score = float(info_score(reference_labels[train_idx], fold_labels))
+        fold_scores.append(score)
+        print(f"Fold {fold_idx}: info_score(train vs full) = {score:.4f}")
+
+    mean_score = float(np.mean(fold_scores)) if fold_scores else float("nan")
+    std_score = float(np.std(fold_scores)) if fold_scores else float("nan")
+
+    print(f"Mean info_score: {mean_score:.4f}")
+    print(f"Std  info_score: {std_score:.4f}")
+
+    return {
+        "reference_labels": reference_labels,
+        "fold_scores": fold_scores,
+        "mean_score": mean_score,
+        "std_score": std_score,
+    }
+
+
+def analyse_soft_spectral_clustering_stability(result):
+    """Compute the mean posterior entropy for a clustering result.
+
+    Parameters
+    ----------
+    result : SpectralClusteringResult
+        Output from :func:`Spectral_Clustering` (ideally with ``soft=True`` to
+        expose posterior probabilities).
+    K : int
+        Number of clusters (unused for now but kept for API compatibility).
+
+    Returns
+    -------
+    float or None
+        Average Shannon entropy over all samples when soft probabilities are
+        available, otherwise ``None``.
+    """
+
+    probs = result.probs
+    if probs is not None:
+        probs_safe = np.clip(probs, 1e-10, 1.0)  # Avoid log(0)
+        entropy_per_point = -np.sum(probs_safe * np.log2(probs_safe), axis=1)
+        mean_entropy = np.mean(entropy_per_point)
+
+    return mean_entropy

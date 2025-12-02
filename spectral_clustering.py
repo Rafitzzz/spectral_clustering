@@ -1,9 +1,20 @@
+import matplotlib.pyplot as plt
 import numpy as np
 import networkx as nx
-from sklearn.cluster import KMeans
 from scipy.spatial.distance import pdist, squareform
-from sklearn.model_selection import ParameterGrid
-import matplotlib.pyplot as plt
+from sklearn.cluster import KMeans
+from sklearn.mixture import GaussianMixture
+
+
+class SpectralClusteringResult:
+    """Encapsulate spectral clustering outputs and provide convenience accessors."""
+
+    def __init__(self, clustering_model, eigenvectors, eigenvalues, labels, probs=None):
+        self.clustering_model = clustering_model
+        self.eigenvectors = np.asarray(eigenvectors)
+        self.eigenvalues = np.asarray(eigenvalues)
+        self.labels = np.asarray(labels)
+        self.probs = None if probs is None else np.asarray(probs)
 
 
 def get_distance_matrix_from_data(X, metric="euclidean"):
@@ -85,7 +96,6 @@ def get_similarity_matrix_from_distance_matrix(
     """
     # TODO: Think about self-edges. They do not change the Laplacian, but do we need to take care of them?
 
-    # Define similarity matrix
     if sim_graph_type == "fully_connect":
         W = np.exp(-distance_matrix / (2 * sigma))
     elif sim_graph_type == "eps_neighbor":
@@ -99,6 +109,7 @@ def get_similarity_matrix_from_distance_matrix(
         # Set the weight (i,j) to 1 when either i or j is within the k-nearest neighbors of each other
         for i in range(closest_neighbors.shape[0]):
             W[i, closest_neighbors[i, :][: (knn + 1)]] = 1
+
     elif sim_graph_type == "mutual_knn":
         W = np.zeros(distance_matrix.shape)
 
@@ -112,6 +123,7 @@ def get_similarity_matrix_from_distance_matrix(
 
         # mutual k-NN: edge exists only when neighbor relation is mutual
         W = (neighbors & neighbors.T).astype("float64")
+
     else:
         raise ValueError(
             "The 'sim_graph_type' argument should be one of the strings, 'fully_connect', 'eps_neighbor', 'knn', or 'mutual_knn'!"
@@ -139,88 +151,97 @@ def count_connected_components(W):
 
     adjacency = (W > 0).astype(int)
     graph = nx.from_numpy_array(adjacency)
+
     return nx.number_connected_components(graph)
 
 
-def Spectral_Clustering(W, K=8, normalized=1, random_state=1):
-    """Cluster the graph defined by ``W`` via spectral embedding + KMeans.
+def Spectral_Clustering(W, K=8, normalized=1, random_state=1, soft=False):
+    """Cluster the graph defined by ``W`` via spectral embedding.
 
     Parameters
     ----------
     W : ndarray
-        Similarity/weight matrix between ``n`` nodes (samples).
+        Similarity/weight matrix between ``n`` nodes.
     K : int
-        Number of clusters/eigenvectors to keep. Default ``8``.
+        Number of clusters/eigenvectors to keep.
     normalized : {0, 1, 2}
         1 = random-walk normalization (default), 2 = symmetric normalization,
-        other values = unnormalized Laplacian.
+        0 = unnormalized.
     random_state : int
-        Seed controlling KMeans initialization for reproducible results. Default
-        ``1``.
+        Seed for reproducibility.
+    soft : bool, optional
+        If True, uses Gaussian Mixture Models (GMM) for soft assignments.
+        If False (default), uses KMeans for hard assignments.
 
     Returns
     -------
-    tuple
-        ``(kmeans, V_K, lambdas)`` with the fitted KMeans, selected eigenvectors,
-        and their eigenvalues.
+    SpectralClusteringResult
+        Structured container with the fitted model, embedding ``V_K``, sorted
+        eigenvalues, labels, and (optionally) posterior probabilities.
     """
 
-    num_components = count_connected_components(W)
-    if num_components > K:
-        raise ValueError(
-            "Similarity graph contains more connected components than the provided K."
-        )
-
-    # Compute the unnormalized graph Laplacian
     D = np.diag(np.sum(W, axis=1))
     L = D - W
 
-    # Random Walk normalized version
+    # Eigen decomposition based on normalization type
     if normalized == 1:
-        D_inv = np.diag(1 / np.diag(D))
-        eigenvalues, eigenvectors = np.linalg.eig(np.dot(D_inv, L))
-        # Sort the eigenvalues by their L2 norms in ascending order and record the indices
-        eigenvalue_indices_sorted = np.argsort(
-            np.linalg.norm(np.reshape(eigenvalues, (1, len(eigenvalues))), axis=0)
-        )
-        V_K = np.real(eigenvectors[:, eigenvalue_indices_sorted[:K]])
-        eigenvalues_sorted = eigenvalues[eigenvalue_indices_sorted]
+        D_inv = np.diag(1.0 / np.diag(D))
+        target_matrix = np.dot(D_inv, L)
 
-    # Graph cut normalized version
+        eigenvalues, eigenvectors = np.linalg.eig(target_matrix)
+
     elif normalized == 2:
-        D_inv_sqrt = np.diag(1 / np.sqrt(np.diag(D)))
-        eigenvalues, eigenvectors = np.linalg.eig(
-            np.matmul(np.matmul(D_inv_sqrt, L), D_inv_sqrt)
-        )
-        # Sort the eigenvalues by their L2 norms in ascending order and record the indices
-        eigenvalue_indices_sorted = np.argsort(
-            np.linalg.norm(np.reshape(eigenvalues, (1, len(eigenvalues))), axis=0)
-        )
-        V_K = np.real(eigenvectors[:, eigenvalue_indices_sorted[:K]])
-        eigenvalues_sorted = eigenvalues[eigenvalue_indices_sorted]
+        D_inv_sqrt = np.diag(1.0 / np.sqrt(np.diag(D)))
+        target_matrix = np.dot(np.dot(D_inv_sqrt, L), D_inv_sqrt)
 
-        if any(V_K.sum(axis=1) == 0):
-            raise ValueError(
-                "Can't normalize the matrix with the first K eigenvectors as columns! Perhaps the number of clusters K or the number of neighbors in k-NN is too small."
-            )
-        # Normalize the row sums to have norm 1
-        V_K = V_K / np.reshape(np.linalg.norm(V_K, axis=1), (V_K.shape[0], 1))
+        eigenvalues, eigenvectors = np.linalg.eig(target_matrix)
 
-    # Unnormalized version
     else:
-        eigenvalues, eigenvectors = np.linalg.eig(L)
-        # Sort the eigenvalues by their L2 norms in ascending order and record the indices
-        eigenvalue_indices_sorted = np.argsort(
-            np.linalg.norm(np.reshape(eigenvalues, (1, len(eigenvalues))), axis=0)
+        target_matrix = L
+        eigenvalues, eigenvectors = np.linalg.eig(target_matrix)
+
+    eigenvalues = np.real(eigenvalues)
+    eigenvectors = np.real(eigenvectors)
+
+    indices = np.argsort(eigenvalues)
+    eigenvalues_sorted = eigenvalues[indices]
+
+    # Select first K eigenvectors
+    V_K = eigenvectors[:, indices[:K]]
+
+    if normalized == 2:
+        # Normalize rows to unit norm
+        row_norms = np.linalg.norm(V_K, axis=1, keepdims=True)
+        row_norms[row_norms == 0] = 1e-10
+        V_K = V_K / row_norms
+
+    # Clustering
+    if soft:
+        gmm = GaussianMixture(
+            n_components=K,
+            covariance_type="full",
+            random_state=random_state,
+            n_init=10,
         )
-        V_K = np.real(eigenvectors[:, eigenvalue_indices_sorted[:K]])
-        eigenvalues_sorted = eigenvalues[eigenvalue_indices_sorted]
+        gmm.fit(V_K)
+        labels = gmm.predict(V_K)
+        probs = gmm.predict_proba(V_K)
 
-    kmeans = KMeans(n_clusters=K, init="k-means++", random_state=random_state).fit(V_K)
+        clustering_model = gmm
+    else:
+        kmeans = KMeans(n_clusters=K, init="k-means++", random_state=random_state)
+        kmeans.fit(V_K)
+        labels = kmeans.labels_
+        probs = None
+        clustering_model = kmeans
 
-    # TODO: Do the eigenvalues of the normalized cases make any sense? Double check and is V_K the correct matrix to be returned
-    # TODO: Epsilon threshold for the zero eigenvalues
-    return (kmeans, V_K, eigenvalues_sorted)
+    return SpectralClusteringResult(
+        clustering_model=clustering_model,
+        eigenvectors=V_K,
+        eigenvalues=eigenvalues_sorted,
+        labels=labels,
+        probs=probs,
+    )
 
 
 def get_eigengap(eigenvalues, zero_tolerance=1e-3, spike_ratio=10.0):
@@ -252,10 +273,11 @@ def get_eigengap(eigenvalues, zero_tolerance=1e-3, spike_ratio=10.0):
         raise ValueError("zero_tolerance must be strictly positive")
 
     eigs_sorted = np.sort(np.abs(np.real(eigenvalues)))
-    if eigs_sorted.size < 2:
+    if eigs_sorted.size < 3:
         return 0.0
 
-    for idx in range(eigs_sorted.size - 1):
+    # Skip the first eigenvalue gap (lambda_0 vs. lambda_1) as we assume >=2 clusters
+    for idx in range(1, eigs_sorted.size - 1):
         current_val = eigs_sorted[idx]
         next_val = eigs_sorted[idx + 1]
 
@@ -302,14 +324,15 @@ def estimate_k_from_eigengap(
         eigenvalues, zero_tolerance=zero_tolerance, spike_ratio=spike_ratio
     )
     if gap == 0.0:
-        return 1
+        return 2
 
     eigs_sorted = np.sort(np.abs(np.real(eigenvalues)))
 
-    if eigs_sorted.size == 1:
-        return 1
+    if eigs_sorted.size <= 2:
+        return 2
 
-    for idx in range(eigs_sorted.size - 1):
+    # Skip the first eigenvalue gap (lambda_0 vs. lambda_1)
+    for idx in range(1, eigs_sorted.size - 1):
         current_val = eigs_sorted[idx]
         next_val = eigs_sorted[idx + 1]
 
@@ -320,75 +343,7 @@ def estimate_k_from_eigengap(
             if np.isclose(spike, gap, atol=match_tol):
                 return idx + 1
 
-    return 1
-
-
-def find_best_params_with_eigengap_grid_search(
-    distance_matrix, param_grid, random_state=1
-):
-    """Return the parameter set that maximizes the eigengap.
-
-    Parameters
-    ----------
-    distance_matrix : ndarray
-        Pairwise distances between samples used to build similarity graphs.
-    param_grid : dict or list of dicts
-        Specification of parameter combinations compatible with ``ParameterGrid``.
-    random_state : int, default=1
-        Seed controlling the ``Spectral_Clustering`` call.
-
-    Returns
-    -------
-    tuple
-        ``(best_gap, best_params)`` with the largest eigengap and the parameter
-        dictionary that produced it.
-    """
-
-    best_gap = -np.inf
-    best_params = None
-
-    for params in ParameterGrid(param_grid):
-        similarity_matrix = get_similarity_matrix_from_distance_matrix(
-            distance_matrix,
-            sim_graph_type=params["sim_graph_type"],
-            sigma=params["sigma"],
-            knn=params["knn"],
-            mutual_knn=params["mutual_knn"],
-            epsilon=params["epsilon"],
-        )
-
-        try:
-            _, _, eigenvalues = Spectral_Clustering(
-                similarity_matrix,
-                K=params["K"],
-                random_state=random_state,
-            )
-        except ValueError as exc:
-            if "connected components" in str(exc).lower():
-                continue
-            raise
-
-        eigengap = get_eigengap(eigenvalues)
-
-        if eigengap > best_gap:
-            best_gap = eigengap
-            best_params = params
-
-            # We also try to estimate k if it does not raise an exemption. Otherwise, it is done manually.
-            try:
-                estimated_k = estimate_k_from_eigengap(eigenvalues)
-                _, _, _ = Spectral_Clustering(
-                    similarity_matrix,
-                    K=estimated_k,
-                    random_state=random_state,
-                )
-                best_params["K"] = estimated_k
-            except ValueError as exc:
-                if "connected components" in str(exc).lower():
-                    continue
-                raise
-
-    return best_params
+    return 2
 
 
 def plot_eigenvalues(eigenvalues_list, labels=None, n_first=10):
