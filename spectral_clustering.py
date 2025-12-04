@@ -4,6 +4,7 @@ import networkx as nx
 from scipy.spatial.distance import pdist, squareform
 from sklearn.cluster import KMeans
 from sklearn.mixture import GaussianMixture
+import plotly.express as px
 
 
 class SpectralClusteringResult:
@@ -398,3 +399,32 @@ def plot_eigenvalues(eigenvalues_list, labels=None, n_first=10):
 
     fig.suptitle("Log First Eigenvalues", fontsize=14)
     fig.tight_layout(rect=[0, 0.03, 1, 0.95])
+
+
+def plot_3d_spectral_embedding(spectral_embedding, true_labels):
+    fig = px.scatter_3d(
+        x=spectral_embedding[:, 0],
+        y=spectral_embedding[:, 1],
+        z=spectral_embedding[:, 2],
+        color=true_labels.astype(str),  # color by true labels
+        title=f"{title} – Spectral Embedding (First 3 Eigenvectors)",
+    )
+    fig.update_traces(marker=dict(size=3))
+    fig.show()
+
+
+def plot_2d_spectral_embedding(spectral_embedding, true_labels):
+    plt.figure(figsize=(6, 5))
+    plt.scatter(
+        spectral_embedding[:, 0],
+        spectral_embedding[:, 1],
+        c=true_labels,
+        cmap="viridis",
+        s=20,
+        edgecolor="k",
+    )
+    plt.title("Spectral Embedding")
+    plt.xlabel("Eigenvector 1")
+    plt.ylabel("Eigenvector 2")
+    plt.tight_layout()
+    plt.show()
