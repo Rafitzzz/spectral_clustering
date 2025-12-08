@@ -255,10 +255,11 @@ def cross_validation_stability_test(
     dummy_features = np.zeros((similarity_matrix.shape[0], 1))
     fold_scores = []
 
-    for fold_idx, (train_idx, _) in enumerate(
+    # Replace train_idx with test_idx below to switch to small disjoint batches
+    for fold_idx, (train_idx, test_idx) in enumerate(
         skf.split(dummy_features, reference_labels), start=1
     ):
-        train_matrix = similarity_matrix[np.ix_(train_idx, train_idx)]
+        train_matrix = similarity_matrix[np.ix_(test_idx, test_idx)]
 
         fold_result = Spectral_Clustering(
             train_matrix,
@@ -267,7 +268,9 @@ def cross_validation_stability_test(
         )
         fold_labels = fold_result.labels
 
-        score = float(info_score(reference_labels[train_idx], fold_labels))
+        print("Labels shape: ", fold_labels.shape)
+
+        score = float(info_score(reference_labels[test_idx], fold_labels))
         fold_scores.append(score)
         print(f"Fold {fold_idx}: info_score(train vs full) = {score:.4f}")
 
