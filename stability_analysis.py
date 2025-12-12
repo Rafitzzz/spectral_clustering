@@ -1,7 +1,10 @@
 import numpy as np
+import pandas as pd
 from scipy.optimize import linear_sum_assignment
 from sklearn.metrics import confusion_matrix, normalized_mutual_info_score, adjusted_mutual_info_score, adjusted_rand_score
 from sklearn.model_selection import StratifiedKFold
+import seaborn as sns
+from spectral_clustering import *
 
 from spectral_clustering import (
     Spectral_Clustering,
@@ -326,3 +329,215 @@ def analyse_soft_spectral_clustering_stability(result):
         mean_entropy = np.mean(entropy_per_point)
 
     return mean_entropy
+
+
+def drop_data_stability_test(
+    distance_matrix,
+    params,
+    n_runs=20,
+    alpha=0.2,
+    random_state=19,
+    info_score=normalized_mutual_info_score,
+):
+    """Evaluate stability by repeatedly dropping a fraction of samples.
+
+    Each run removes ``alpha`` proportion of samples at random, fits spectral
+    clustering on the remaining data, and compares the resulting labels to the
+    reference partition obtained from the full dataset.
+
+    Parameters
+    ----------
+    distance_matrix : ndarray
+        Pairwise distance matrix for the full dataset (square).
+    params : dict
+        Graph-construction parameters (``sim_graph_type``, ``knn``, etc.) and the
+        desired number of clusters ``K``.
+    n_runs : int, default=20
+        Number of random subsampling experiments to perform.
+    alpha : float, default=0.2
+        Fraction of samples to drop on each run. Must satisfy ``0 <= alpha < 1``.
+    random_state : int, default=19
+        Seed controlling the random subsampling and clustering randomness.
+    info_score : callable, default=normalized_mutual_info_score
+        Scoring function comparing the reference labels with run-specific labels.
+
+    Returns
+    -------
+    dict
+        Dictionary containing the reference labels, per-run scores, and their
+        mean/std summary.
+    """
+
+    if (
+        distance_matrix.ndim != 2
+        or distance_matrix.shape[0] != distance_matrix.shape[1]
+    ):
+        raise ValueError("distance_matrix must be a square matrix")
+    if not (0 <= alpha < 1):
+        raise ValueError("alpha must be in the [0, 1) interval")
+    if n_runs < 1:
+        raise ValueError("n_runs must be at least 1")
+
+    similarity_matrix = get_similarity_matrix_from_distance_matrix(
+        distance_matrix,
+        sim_graph_type=params["sim_graph_type"],
+        knn=params["knn"],
+        mutual_knn=params["mutual_knn"],
+        sigma=params["sigma"],
+        epsilon=params["epsilon"],
+    )
+
+    full_result = Spectral_Clustering(
+        similarity_matrix,
+        K=params["K"],
+        random_state=random_state,
+    )
+    reference_labels = full_result.labels
+
+    n_samples = distance_matrix.shape[0]
+    rng = np.random.RandomState(random_state)
+    keep_size = max(params["K"], int(round((1 - alpha) * n_samples)))
+    keep_size = min(n_samples, keep_size)
+    if keep_size <= 0:
+        raise ValueError("alpha is too large; no samples would remain.")
+
+    fold_scores = []
+
+    for run_idx in range(1, n_runs + 1):
+        keep_idx = np.sort(rng.choice(n_samples, size=keep_size, replace=True))
+
+        train_dist_matrix = distance_matrix[np.ix_(keep_idx, keep_idx)]
+        train_matrix = get_similarity_matrix_from_distance_matrix(
+            train_dist_matrix,
+            sim_graph_type=params["sim_graph_type"],
+            knn=params["knn"],
+            mutual_knn=params["mutual_knn"],
+            sigma=params["sigma"],
+            epsilon=params["epsilon"],
+        )
+
+        run_result = Spectral_Clustering(
+            train_matrix,
+            K=params["K"],
+            random_state=random_state + run_idx,
+        )
+        run_labels = run_result.labels
+
+        score = float(info_score(reference_labels[keep_idx], run_labels))
+        fold_scores.append(score)
+        print(
+            f"Run {run_idx}: kept {keep_size}/{n_samples} samples, info_score = {score:.4f}"
+        )
+
+    mean_score = float(np.mean(fold_scores)) if fold_scores else float("nan")
+    std_score = float(np.std(fold_scores)) if fold_scores else float("nan")
+
+    print(f"Mean info_score: {mean_score:.4f}")
+    print(f"Std  info_score: {std_score:.4f}")
+
+    return {
+        "reference_labels": reference_labels,
+        "fold_scores": fold_scores,
+        "mean_score": mean_score,
+        "std_score": std_score,
+    }
+
+
+def plot_cross_validation_stability_test_result(
+    stability_res_ami,
+    stability_res_ars,
+    metric_names=("AMI", "ARS"),
+    palette=None,
+    ax=None,
+):
+    """Visualize two cross-validation stability test outputs side by side."""
+
+    if len(metric_names) != 2:
+        raise ValueError("metric_names must provide exactly two labels")
+
+    fold_scores_a = np.asarray(stability_res_ami["fold_scores"], dtype=float)
+    fold_scores_b = np.asarray(stability_res_ars["fold_scores"], dtype=float)
+
+    comparison_df = pd.DataFrame(
+        {
+            "Fold": np.tile(np.arange(1, fold_scores_a.size + 1), 2),
+            "Score": np.concatenate([fold_scores_a, fold_scores_b]),
+            "Metric": [metric_names[0]] * fold_scores_a.size
+            + [metric_names[1]] * fold_scores_b.size,
+        }
+    )
+
+    if palette is None:
+        palette = {
+            metric_names[0]: PRESENTATION_COLORS[0],
+            metric_names[1]: PRESENTATION_COLORS[3],
+        }
+
+    sns.set_theme(style="whitegrid", context="talk")
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(10, 5))
+    else:
+        fig = ax.figure
+
+    sns.barplot(
+        data=comparison_df,
+        x="Fold",
+        y="Score",
+        hue="Metric",
+        palette=palette,
+        edgecolor="black",
+        linewidth=0.4,
+        ax=ax,
+        dodge=True,
+        alpha=0.9,
+    )
+
+    ax.set_ylim(0.0, 1.05)
+    ax.set_ylabel("Stability Score")
+    ax.set_title("Stability Across Folds")
+    ax.legend(bbox_to_anchor=(1.02, 0.5), frameon=False)
+
+    mean_a = fold_scores_a.mean()
+    mean_b = fold_scores_b.mean()
+
+    ax.axhline(
+        mean_a,
+        color=palette[metric_names[0]],
+        linestyle="--",
+        linewidth=1.2,
+        alpha=0.8,
+    )
+    ax.axhline(
+        mean_b,
+        color=palette[metric_names[1]],
+        linestyle=":",
+        linewidth=1.2,
+        alpha=0.8,
+    )
+
+    label_x = comparison_df["Fold"].max() + 1.2
+
+    ax.text(
+        label_x,
+        mean_a - 0.04,
+        f"{metric_names[0]} mean = {mean_a:.2f}",
+        color=palette[metric_names[0]],
+        va="bottom",
+        ha="right",
+        fontsize=10,
+        fontweight="semibold",
+    )
+    ax.text(
+        label_x,
+        mean_b + 0.04,
+        f"{metric_names[1]} mean = {mean_b:.2f}",
+        color=palette[metric_names[1]],
+        va="top",
+        ha="right",
+        fontsize=10,
+        fontweight="semibold",
+    )
+
+    sns.despine(trim=True)
+    fig.tight_layout()
+    return ax
