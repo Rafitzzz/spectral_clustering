@@ -1,6 +1,6 @@
 import numpy as np
 from scipy.optimize import linear_sum_assignment
-from sklearn.metrics import confusion_matrix, normalized_mutual_info_score
+from sklearn.metrics import confusion_matrix, normalized_mutual_info_score, adjusted_mutual_info_score, adjusted_rand_score
 from sklearn.model_selection import StratifiedKFold
 
 from spectral_clustering import (
@@ -46,7 +46,6 @@ def match_labels(y_true, y_pred):
 
     return cm_matched, y_pred_matched
 
-
 def perturb_data(X, noise_std, rng=None):
     """Return a perturbed copy of ``X`` by adding Gaussian noise.
 
@@ -68,7 +67,6 @@ def perturb_data(X, noise_std, rng=None):
     if rng is None:
         rng = np.random.RandomState(random_state)
     return X + rng.normal(loc=0.0, scale=noise_std, size=X.shape)
-
 
 def run_single_clustering_on_perturbation(
     X, y_true, noise_std, best_params, K=2, rng=None, random_state=1
@@ -127,7 +125,6 @@ def run_single_clustering_on_perturbation(
         "eigenvalues": result.eigenvalues,
         "eigenvectors": result.eigenvectors,
     }
-
 
 def run_experiment(
     X,
@@ -200,13 +197,11 @@ def run_experiment(
         return results
     return {"results": results, "accuracy": accuracy}
 
-
 def cross_validation_stability_test(
-    similarity_matrix,
-    K_folds=5,
-    K_clusters=4,
+    distance_matrix,
+    params,
+    K_folds=10,
     random_state=19,
-    test_size=0.20,
     info_score=normalized_mutual_info_score,
 ):
     """Evaluate spectral clustering stability via stratified K-fold splits.
@@ -221,8 +216,6 @@ def cross_validation_stability_test(
         Number of clusters to request from :func:`Spectral_Clustering`.
     random_state : int, default=19
         Seed for the ``StratifiedKFold`` shuffling as well as per-fold clustering.
-    test_size : float, default=0.20
-        Reserved for API compatibility; not used directly in the current routine.
     info_score : callable, default=normalized_mutual_info_score
         Function applied to compare the per-fold labels with the reference
         partition. Larger values indicate closer agreement.
@@ -235,16 +228,25 @@ def cross_validation_stability_test(
     """
 
     if (
-        similarity_matrix.ndim != 2
-        or similarity_matrix.shape[0] != similarity_matrix.shape[1]
+        distance_matrix.ndim != 2
+        or distance_matrix.shape[0] != distance_matrix.shape[1]
     ):
         raise ValueError("similarity_matrix must be a square matrix")
     if K_folds < 2:
         raise ValueError("K_folds must be at least 2")
 
+    similarity_matrix = get_similarity_matrix_from_distance_matrix(
+        distance_matrix,
+        sim_graph_type=params["sim_graph_type"],
+        knn=params["knn"],
+        mutual_knn=params["mutual_knn"],
+        sigma=params["sigma"],
+        epsilon=params["epsilon"],
+    )
+
     full_result = Spectral_Clustering(
         similarity_matrix,
-        K=K_clusters,
+        K=params["K"],
         random_state=random_state,
     )
     reference_labels = full_result.labels
@@ -258,17 +260,29 @@ def cross_validation_stability_test(
     dummy_features = np.zeros((similarity_matrix.shape[0], 1))
     fold_scores = []
 
-    for fold_idx, (train_idx, _) in enumerate(
+    # Replace train_idx with test_idx below to switch to small disjoint batches
+    for fold_idx, (train_idx, test_idx) in enumerate(
         skf.split(dummy_features, reference_labels), start=1
     ):
-        train_matrix = similarity_matrix[np.ix_(train_idx, train_idx)]
+        train_dist_matrix = distance_matrix[np.ix_(train_idx, train_idx)]
+
+        train_matrix = get_similarity_matrix_from_distance_matrix(
+            train_dist_matrix,
+            sim_graph_type=params["sim_graph_type"],
+            knn=params["knn"],
+            mutual_knn=params["mutual_knn"],
+            sigma=params["sigma"],
+            epsilon=params["epsilon"],
+        )
 
         fold_result = Spectral_Clustering(
             train_matrix,
-            K=K_clusters,
+            K=params["K"],
             random_state=random_state + fold_idx,
         )
         fold_labels = fold_result.labels
+
+        print("Labels shape: ", fold_labels.shape)
 
         score = float(info_score(reference_labels[train_idx], fold_labels))
         fold_scores.append(score)
@@ -286,7 +300,6 @@ def cross_validation_stability_test(
         "mean_score": mean_score,
         "std_score": std_score,
     }
-
 
 def analyse_soft_spectral_clustering_stability(result):
     """Compute the mean posterior entropy for a clustering result.
