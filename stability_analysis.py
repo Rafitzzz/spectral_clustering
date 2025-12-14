@@ -68,7 +68,7 @@ def perturb_data(X, noise_std, rng=None):
         Noisy data with the same shape as ``X``.
     """
     if rng is None:
-        rng = np.random.RandomState(random_state)
+        rng = np.random.RandomState(rng)
     return X + rng.normal(loc=0.0, scale=noise_std, size=X.shape)
 
 def run_single_clustering_on_perturbation(
